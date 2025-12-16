@@ -1,0 +1,106 @@
+<html>
+<body>
+<pre>
+<h1>µVision Build Log</h1>
+<h2>Tool Versions:</h2>
+IDE-Version: ¦ÌVision V5.38.0.0
+Copyright (C) 2022 ARM Ltd and ARM Germany GmbH. All rights reserved.
+License Information: 1 langjinchi0515@126.com, 1, LIC=SDA0P-M01YT-PCUJ8-32UBR-XIRF7-RI5RF
+ 
+Tool Versions:
+Toolchain:       MDK-ARM Plus  Version: 5.31.0.0
+Toolchain Path:  C:\Keil_v5\ARM\ARMCC\Bin
+C Compiler:      Armcc.exe V5.06 update 6 (build 750)
+Assembler:       Armasm.exe V5.06 update 6 (build 750)
+Linker/Locator:  ArmLink.exe V5.06 update 6 (build 750)
+Library Manager: ArmAr.exe V5.06 update 6 (build 750)
+Hex Converter:   FromElf.exe V5.06 update 6 (build 750)
+CPU DLL:         SARMCM3.DLL V5.31.0.0
+Dialog DLL:      DCM.DLL V1.17.3.0
+Target DLL:      STLink\ST-LINKIII-KEIL_SWO.dll V3.0.7.0
+Dialog DLL:      TCM.DLL V1.46.0.0
+ 
+<h2>Project:</h2>
+C:\Users\langj\Desktop\JieDan\ProjectForCurrentSource\MDK-ARM\ProjectForCurrentSource.uvprojx
+Project File Date:  12/06/2025
+
+<h2>Output:</h2>
+*** Using Compiler 'V5.06 update 6 (build 750)', folder: 'C:\Keil_v5\ARM\ARMCC\Bin'
+Rebuild target 'ProjectForCurrentSource'
+assembling startup_stm32f103xb.s...
+compiling OLED_Data.c...
+compiling tim.c...
+compiling stm32f1xx_hal_cortex.c...
+compiling usart.c...
+compiling flash_storage.c...
+compiling stm32f1xx_hal.c...
+compiling stm32f1xx_hal_exti.c...
+compiling stm32f1xx_hal_rcc_ex.c...
+compiling stm32f1xx_hal_pwr.c...
+compiling stm32f1xx_hal_gpio_ex.c...
+compiling stm32f1xx_it.c...
+compiling stm32f1xx_hal_msp.c...
+compiling stm32f1xx_hal_gpio.c...
+compiling main.c...
+../Core/Src/main.c(142): warning:  #1295-D: Deprecated declaration setCurrent - give arg types
+  void setCurrent();
+../Core/Src/main.c(144): warning:  #1295-D: Deprecated declaration setVoltage - give arg types
+  void setVoltage();
+../Core/Src/main.c(146): warning:  #1295-D: Deprecated declaration setPWMFrequency - give arg types
+  void setPWMFrequency();
+../Core/Src/main.c(148): warning:  #1295-D: Deprecated declaration setPWMDutyCycle - give arg types
+  void setPWMDutyCycle();
+../Core/Src/main.c(150): warning:  #1295-D: Deprecated declaration setFullScaleCompensation - give arg types
+  void setFullScaleCompensation();
+../Core/Src/main.c(152): warning:  #1295-D: Deprecated declaration setMode - give arg types
+  void setMode();
+../Core/Src/main.c(154): warning:  #1295-D: Deprecated declaration setChannelStatus - give arg types
+  void setChannelStatus();
+../Core/Src/main.c(784): warning:  #186-D: pointless comparison of unsigned integer with zero
+          if (val >= MIN_CURRENT && val <= MAX_CURRENT) {
+../Core/Src/main.c(805): warning:  #186-D: pointless comparison of unsigned integer with zero
+          if (val >= MIN_VOLTAGE && val <= MAX_VOLTAGE) {
+../Core/Src/main.c: 9 warnings, 0 errors
+compiling gpio.c...
+compiling oled.c...
+compiling stm32f1xx_hal_dma.c...
+compiling i2c.c...
+compiling stm32f1xx_hal_flash_ex.c...
+compiling stm32f1xx_hal_rcc.c...
+compiling stm32f1xx_hal_flash.c...
+compiling system_stm32f1xx.c...
+compiling stm32f1xx_hal_tim_ex.c...
+compiling stm32f1xx_hal_tim.c...
+compiling stm32f1xx_hal_uart.c...
+compiling stm32f1xx_hal_i2c.c...
+linking...
+Program Size: Code=24200 RO-data=2496 RW-data=92 ZI-data=3316  
+FromELF: creating hex file...
+"ProjectForCurrentSource\ProjectForCurrentSource.axf" - 0 Error(s), 9 Warning(s).
+
+<h2>Software Packages used:</h2>
+
+Package Vendor: ARM
+                http://www.keil.com/pack/ARM.CMSIS.5.7.0.pack
+                ARM.CMSIS.5.7.0
+                CMSIS (Cortex Microcontroller Software Interface Standard)
+   * Component: CORE Version: 5.4.0
+
+Package Vendor: Keil
+                http://www.keil.com/pack/Keil.STM32F1xx_DFP.2.1.0.pack
+                Keil.STM32F1xx_DFP.2.1.0
+                STMicroelectronics STM32F1 Series Device Support, Drivers and Examples
+
+<h2>Collection of Component include folders:</h2>
+  ./RTE/_ProjectForCurrentSource
+  C:/Users/langj/AppData/Local/Arm/Packs/ARM/CMSIS/5.7.0/CMSIS/Core/Include
+  C:/Users/langj/AppData/Local/Arm/Packs/Keil/STM32F1xx_DFP/2.1.0/Device/Include
+
+<h2>Collection of Component Files used:</h2>
+
+   * Component: ARM::CMSIS:CORE:5.4.0
+      Include file:  CMSIS/Core/Include/tz_context.h
+Build Time Elapsed:  00:00:03
+</pre>
+</body>
+</html>
