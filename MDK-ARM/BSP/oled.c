@@ -1,6 +1,5 @@
 /* oled_hal.c */
 #include "oled.h"
-#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
@@ -18,11 +17,13 @@ void OLED_WriteCommand(uint8_t Command)
 
 void OLED_WriteData(uint8_t *Data, uint8_t Count)
 {
-    uint8_t *buf = malloc(Count + 1);
+    uint8_t buf[129];
+    if (Count > 128) {
+        Count = 128;
+    }
     buf[0] = 0x40;
     memcpy(&buf[1], Data, Count);
     HAL_I2C_Master_Transmit(&hi2c1, OLED_I2C_ADDR, buf, Count + 1, HAL_MAX_DELAY);
-    free(buf);
 }
 
 void OLED_SetCursor(uint8_t Page, uint8_t X)

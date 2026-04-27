@@ -62,6 +62,7 @@ extern UIState_t uiState;  // 定义UI状�?�结构体实例
 /* USER CODE BEGIN PD */
 #define LONG_PRESS_TIME 10  // 长按判定时间（ms�??
 #define REPEAT_RATE     50   // 连续加减的频率（ms�??
+#define TURBO_PRESS_TIME 40
 #define RX_BUFFER_SIZE 64
 #define MIN_CURRENT   0   // �??小电�??
 #define MAX_CURRENT   400 // �??大电�??
@@ -139,19 +140,19 @@ void KeyScan(void);
 void SetGP(void);
 void initChannels(void);
 // 设置电流
-void setCurrent();
+void setCurrent(void);
 // 设置电压
-void setVoltage();
+void setVoltage(void);
 // 设置PWM频率
-void setPWMFrequency();
+void setPWMFrequency(void);
 // 设置PWM占空�??
-void setPWMDutyCycle();
+void setPWMDutyCycle(void);
 // 设置满量程补�??
-void setFullScaleCompensation();
+void setFullScaleCompensation(void);
 // 设置电流/电压模式
-void setMode();
+void setMode(void);
 // 设置通道状�?�（设备连接状�?�）
-void setChannelStatus();
+void setChannelStatus(void);
 void initUIState(void);
 void showSettingsPage(void);
 void SaveCalibrationToFlash(void);
@@ -161,6 +162,11 @@ void showCalibrationPage(void);
 void initMultiCalibData(void);
 void setCurrentWithCalib(void);  // 使用多点校准的电流输出
 void outputCalibPoint(uint8_t pointIndex);  // 输出校准点
+static uint16_t CalculateCurrentDacCodeLinear(uint8_t ch, uint16_t targetValue);
+static void SanitizeMultiCalibChannel(uint8_t ch);
+static uint8_t FindCalibrationSegment(uint8_t ch, uint16_t targetValue);
+static uint16_t GetLongPressStep(uint32_t pressTime, uint16_t normalStep, uint16_t turboStep);
+static HAL_StatusTypeDef GP8630_WriteFrame(uint8_t ch, const uint8_t *data, uint16_t size);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -313,6 +319,73 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+static uint16_t CalculateCurrentDacCodeLinear(uint8_t ch, uint16_t targetValue) {
+    float fullS = channels[ch].full_scale_A / 10.0f;
+    float zeroOffset = channels[ch].zero_offset_A / 10.0f;
+    float adjustedValue = targetValue;
+
+    if (fullS <= 0.0f) {
+        fullS = 400.0f;
+    }
+
+    if (adjustedValue >= zeroOffset) {
+        adjustedValue -= zeroOffset;
+    } else {
+        adjustedValue = 0.0f;
+    }
+
+    if (adjustedValue > fullS) {
+        adjustedValue = fullS;
+    }
+
+    return (uint16_t)((adjustedValue / fullS) * 0xFFFF);
+}
+
+static void SanitizeMultiCalibChannel(uint8_t ch) {
+    if (ch >= 4) {
+        return;
+    }
+
+    for (uint8_t i = 1; i < CALIB_POINTS_NUM; i++) {
+        if (multiCalibData[ch][i] < multiCalibData[ch][i - 1]) {
+            multiCalibData[ch][i] = multiCalibData[ch][i - 1];
+        }
+    }
+}
+
+static uint8_t FindCalibrationSegment(uint8_t ch, uint16_t targetValue) {
+    uint8_t bestIdx = 0;
+    uint16_t bestDistance = 0xFFFF;
+
+    for (uint8_t i = 0; i < CALIB_POINTS_NUM - 1; i++) {
+        uint16_t p1 = multiCalibData[ch][i];
+        uint16_t p2 = multiCalibData[ch][i + 1];
+        uint16_t low = (p1 < p2) ? p1 : p2;
+        uint16_t high = (p1 > p2) ? p1 : p2;
+        uint16_t distance;
+
+        if (targetValue >= low && targetValue <= high) {
+            return i;
+        }
+
+        distance = (targetValue < low) ? (low - targetValue) : (targetValue - high);
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIdx = i;
+        }
+    }
+
+    return bestIdx;
+}
+
+static uint16_t GetLongPressStep(uint32_t pressTime, uint16_t normalStep, uint16_t turboStep) {
+    if (pressTime >= TURBO_PRESS_TIME) {
+        return turboStep;
+    }
+
+    return normalStep;
+}
+
 void initUIState(void) {
     uiState.modeFlag = 0;            // 默认电流模式
     uiState.channelFlag = 0;         // 默认选择通道1
@@ -334,10 +407,68 @@ void initChannels(void) {
         channels[i].status = 0;  // 初始状�?�未连接
     }
 }
-void setCurrent() {
+
+static HAL_StatusTypeDef GP8630_WriteFrame(uint8_t ch, const uint8_t *data, uint16_t size) {
+    HAL_StatusTypeDef status = HAL_ERROR;
+
+    for (uint8_t retry = 0; retry < 3; retry++) {
+        status = HAL_I2C_Master_Transmit(&hi2c1, (0x58 + ch) << 1, (uint8_t *)data, size, HAL_MAX_DELAY);
+        if (status == HAL_OK) {
+            return HAL_OK;
+        }
+        HAL_Delay(2);
+    }
+
+    return status;
+}
+
+void setCurrent(void) {
     uint8_t ch = uiState.channelFlag;
     uint16_t targetValue = channels[ch].current_value;  // 目标电流值 (以100为基数)
-    uint16_t data;
+
+    {
+        uint16_t improvedData;
+        uint8_t txBuffer[3];
+
+        if (multiCalibEnabled[ch]) {
+            uint8_t idx;
+            float t1;
+            float t2;
+            float m1;
+            float m2;
+            float dacOutput;
+
+            SanitizeMultiCalibChannel(ch);
+            idx = FindCalibrationSegment(ch, targetValue);
+            t1 = calibTargetValues[idx];
+            t2 = calibTargetValues[idx + 1];
+            m1 = multiCalibData[ch][idx];
+            m2 = multiCalibData[ch][idx + 1];
+
+            if ((m2 - m1 > 0.001f) || (m1 - m2 > 0.001f)) {
+                dacOutput = t1 + (targetValue - m1) * (t2 - t1) / (m2 - m1);
+                if (dacOutput < 0.0f) {
+                    dacOutput = 0.0f;
+                }
+                if (dacOutput > 400.0f) {
+                    dacOutput = 400.0f;
+                }
+                improvedData = (uint16_t)((dacOutput / 400.0f) * 0xFFFF);
+            } else {
+                improvedData = CalculateCurrentDacCodeLinear(ch, targetValue);
+            }
+        } else {
+            improvedData = CalculateCurrentDacCodeLinear(ch, targetValue);
+        }
+
+        txBuffer[0] = 0x02;
+        txBuffer[1] = improvedData & 0xFF;
+        txBuffer[2] = (improvedData >> 8) & 0xFF;
+        GP8630_WriteFrame(ch, txBuffer, 3);
+        return;
+    }
+
+#if 0
 
     // 如果启用了多点校准，使用插值补偿
     if (multiCalibEnabled[ch]) {
@@ -401,9 +532,10 @@ void setCurrent() {
     buffer2[2] = (data >> 8) & 0xFF;
 
     HAL_I2C_Master_Transmit(&hi2c1, (0x58 + ch) << 1, buffer2, 3, HAL_MAX_DELAY);
+#endif
 }
 
-void setVoltage() {
+void setVoltage(void) {
     float value = channels[uiState.channelFlag].voltage_value;
     float fullS = channels[uiState.channelFlag].full_scale_V / 10.0f;  // 转换为与value同基数(100)
     float zeroOffset = channels[uiState.channelFlag].zero_offset_V / 10.0f;  // 转换为与value同基数(100)
@@ -422,11 +554,11 @@ void setVoltage() {
     buffer2[1] = data & 0xFF;        // DATA Low
     buffer2[2] = (data >> 8) & 0xFF; // DATA High
 
-    HAL_I2C_Master_Transmit(&hi2c1, (0x58 + uiState.channelFlag) << 1, buffer2, 3, HAL_MAX_DELAY);
+    GP8630_WriteFrame(uiState.channelFlag, buffer2, 3);
 
 }
 
-void setPWMFrequency() {
+void setPWMFrequency(void) {
       uint8_t ch = uiState.channelFlag;
 
       if (ch > 3) return;  // 防止数组越界
@@ -489,7 +621,7 @@ void setPWMFrequency() {
       }
   }
 
-void setPWMDutyCycle() {
+void setPWMDutyCycle(void) {
     uint8_t ch = uiState.channelFlag;
     if (ch > 3) return;  // 防止越界
 
@@ -517,33 +649,35 @@ void setPWMDutyCycle() {
 
     __HAL_TIM_SET_COMPARE(htim, tim_channel, ccr);
 }
-void setFullScaleCompensation() {
+void setFullScaleCompensation(void) {
     uint8_t buffer2[3];
     buffer2[0] = 0x02;               // 控制命令地址
     buffer2[1] = 0xFF;        // DATA Low
     buffer2[2] = 0xFF; // DATA High
 
-    HAL_I2C_Master_Transmit(&hi2c1, (0x58 + uiState.channelFlag) << 1, buffer2, 3, HAL_MAX_DELAY);
+    GP8630_WriteFrame(uiState.channelFlag, buffer2, 3);
 }
 
-void setMode() {
+void setMode(void) {
     if(channels[uiState.channelFlag].mode){
 					buffer[0] = 0x01;           // 控制命令地址
 					buffer[1] = 0x1C;           // 命令高位
-					HAL_I2C_Master_Transmit(&hi2c1, (0x58 + uiState.channelFlag) << 1, buffer, 2, HAL_MAX_DELAY);
+					if (GP8630_WriteFrame(uiState.channelFlag, buffer, 2) != HAL_OK) return;
 
+					HAL_Delay(2);
 					setVoltage();
 		}
 		else{
 					buffer[0] = 0x01;           // 控制命令地址
 					buffer[1] = 0x24;           // 命令高位
-					HAL_I2C_Master_Transmit(&hi2c1, (0x58 + uiState.channelFlag) << 1, buffer, 2, HAL_MAX_DELAY);
+					if (GP8630_WriteFrame(uiState.channelFlag, buffer, 2) != HAL_OK) return;
 
+					HAL_Delay(2);
 					setCurrent();
 		}
 }
 
-void setChannelStatus() {
+void setChannelStatus(void) {
 
 }
 void showSettingsPage(void) {
@@ -781,11 +915,12 @@ void ParseCommand(char *cmd) {
         uint8_t ch = index - 1;
         uint16_t val = (uint16_t)(value * 100);
 
-        if (val >= MIN_CURRENT && val <= MAX_CURRENT) {
+        if (value >= 0.0f && value <= (MAX_CURRENT / 100.0f)) {
             A[ch] = val;
             channels[ch].current_value = val;
             channels[ch].mode = 0;  // 电流模式
             uiState.channelFlag = ch;
+            setMode();
 
             setCurrent();  // 立即应用
 
@@ -802,12 +937,12 @@ void ParseCommand(char *cmd) {
         uint8_t ch = index - 1;
         uint16_t val = (uint16_t)(value * 100);
 
-        if (val >= MIN_VOLTAGE && val <= MAX_VOLTAGE) {
+        if (value >= 0.0f && value <= (MAX_VOLTAGE / 100.0f)) {
             V[ch] = val;
             channels[ch].voltage_value = val;
             channels[ch].mode = 1;  // 电压模式
             uiState.channelFlag = ch;
-
+            setMode();
             setVoltage();
 
             snprintf(response, sizeof(response), "Set V%hhu = %.2fV OK\r\n", index, value);
@@ -823,7 +958,7 @@ void ParseCommand(char *cmd) {
         uint8_t ch = index - 1;
         uint16_t freq = (uint16_t)value;
 
-        if (freq >= MIN_PWM_FREQ && freq <= MAX_PWM_FREQ) {
+        if (value >= (float)MIN_PWM_FREQ && value <= (float)MAX_PWM_FREQ) {
             channels[ch].pwm_frequency = freq;
             uiState.channelFlag = ch;
 
@@ -842,7 +977,7 @@ void ParseCommand(char *cmd) {
         uint8_t ch = index - 1;
         uint8_t duty = (uint8_t)value;
 
-        if (duty <= 100) {
+        if (value >= 0.0f && value <= 100.0f) {
             channels[ch].pwm_duty_cycle = duty;
             uiState.channelFlag = ch;
 
@@ -860,7 +995,7 @@ void ParseCommand(char *cmd) {
 			uint8_t ch = index - 1;
 			uint8_t mode = (uint8_t)value;
 
-			if (mode == 0 || mode == 1) {
+			if (value == 0.0f || value == 1.0f) {
 					channels[ch].mode = mode;
 					uiState.channelFlag = ch;
 
@@ -921,56 +1056,57 @@ void KeyScan(void) {
 							key_press_time1++;
 							// 校准页面长按处理
 							if (key_press_time1 >= LONG_PRESS_TIME && inCalibPage) {
-								if (calibInputValue < 500) calibInputValue += 1;  // 最大5mA
+								if (calibInputValue + GetLongPressStep(key_press_time1, 1, 5) <= 500) calibInputValue += GetLongPressStep(key_press_time1, 1, 5);  // 最大5mA
+								else calibInputValue = 500;
 							}
 							else if (key_press_time1 >= LONG_PRESS_TIME && uiState.isSettingFlag) {
 									if (uiState.settingFlag == 2) {  // 电流/电压值
 											if (channels[uiState.channelFlag].mode == 0) {  // 电流模式
-													if (channels[uiState.channelFlag].current_value == MAX_CURRENT) {
+													if (channels[uiState.channelFlag].current_value + GetLongPressStep(key_press_time1, 1, 5) > MAX_CURRENT) {
 															channels[uiState.channelFlag].current_value = 0;
 													}
 													else{
-															channels[uiState.channelFlag].current_value += 1;
+															channels[uiState.channelFlag].current_value += GetLongPressStep(key_press_time1, 1, 5);
 													}
 											} else {  // 电压模式
-													if (channels[uiState.channelFlag].voltage_value == MAX_VOLTAGE) {
+													if (channels[uiState.channelFlag].voltage_value + GetLongPressStep(key_press_time1, 1, 5) > MAX_VOLTAGE) {
 															channels[uiState.channelFlag].voltage_value = 0;
 													}
 													else{
-															channels[uiState.channelFlag].voltage_value += 1;
+															channels[uiState.channelFlag].voltage_value += GetLongPressStep(key_press_time1, 1, 5);
 													}
 											}
 									} else if (uiState.settingFlag == 3) {  // PWM频率
-											if (channels[uiState.channelFlag].pwm_frequency < MAX_PWM_FREQ) {
-													channels[uiState.channelFlag].pwm_frequency += 1;  // 增加PWM频率
+											if (channels[uiState.channelFlag].pwm_frequency + GetLongPressStep(key_press_time1, 1, 5) <= MAX_PWM_FREQ) {
+													channels[uiState.channelFlag].pwm_frequency += GetLongPressStep(key_press_time1, 1, 5);  // 增加PWM频率
 											}
 											else
 													channels[uiState.channelFlag].pwm_frequency = MIN_PWM_FREQ;  // 增加PWM频率
 									} else if (uiState.settingFlag == 4) {  // PWM占空�??
-											if (channels[uiState.channelFlag].pwm_duty_cycle < MAX_DUTY) {
-													channels[uiState.channelFlag].pwm_duty_cycle += 1;  // 增加PWM占空�??
+											if (channels[uiState.channelFlag].pwm_duty_cycle + GetLongPressStep(key_press_time1, 1, 5) <= MAX_DUTY) {
+													channels[uiState.channelFlag].pwm_duty_cycle += GetLongPressStep(key_press_time1, 1, 5);  // 增加PWM占空�??
 											}
 											else
 													channels[uiState.channelFlag].pwm_duty_cycle = MIN_DUTY;  // 增加PWM占空�??
 									} 
 									else if (uiState.settingFlag == 5) {
 										if(channels[uiState.channelFlag].mode){
-													channels[uiState.channelFlag].full_scale_V += 10;
+													channels[uiState.channelFlag].full_scale_V += GetLongPressStep(key_press_time1, 10, 50);
 										}
 										else{
-													channels[uiState.channelFlag].full_scale_A += 10;
+													channels[uiState.channelFlag].full_scale_A += GetLongPressStep(key_press_time1, 10, 50);
 										}
 									}
 									else if (uiState.settingFlag == 6) {  // 零点偏移
 										if(channels[uiState.channelFlag].mode){
-											if (channels[uiState.channelFlag].zero_offset_V < MAX_ZERO_OFFSET)
-												channels[uiState.channelFlag].zero_offset_V += 10;
+											if (channels[uiState.channelFlag].zero_offset_V + GetLongPressStep(key_press_time1, 10, 50) <= MAX_ZERO_OFFSET)
+												channels[uiState.channelFlag].zero_offset_V += GetLongPressStep(key_press_time1, 10, 50);
 											else
 												channels[uiState.channelFlag].zero_offset_V = MIN_ZERO_OFFSET;
 										}
 										else{
-											if (channels[uiState.channelFlag].zero_offset_A < MAX_ZERO_OFFSET)
-												channels[uiState.channelFlag].zero_offset_A += 10;
+											if (channels[uiState.channelFlag].zero_offset_A + GetLongPressStep(key_press_time1, 10, 50) <= MAX_ZERO_OFFSET)
+												channels[uiState.channelFlag].zero_offset_A += GetLongPressStep(key_press_time1, 10, 50);
 											else
 												channels[uiState.channelFlag].zero_offset_A = MIN_ZERO_OFFSET;
 										}
@@ -1072,61 +1208,62 @@ void KeyScan(void) {
             key_press_time2++;
 						// 校准页面长按处理
 						if (key_press_time2 >= LONG_PRESS_TIME && inCalibPage) {
-							if (calibInputValue > 0) calibInputValue -= 1;
+							if (calibInputValue >= GetLongPressStep(key_press_time2, 1, 5)) calibInputValue -= GetLongPressStep(key_press_time2, 1, 5);
+							else calibInputValue = 0;
 						}
 						else if (key_press_time2 >= LONG_PRESS_TIME && uiState.isSettingFlag) {
 							if (uiState.settingFlag == 2) {  // 电流/电压值
 									if (channels[uiState.channelFlag].mode == 0) {  // 电流模式
-											if (channels[uiState.channelFlag].current_value == MIN_CURRENT) {
+											if (channels[uiState.channelFlag].current_value < GetLongPressStep(key_press_time2, 1, 5)) {
 													channels[uiState.channelFlag].current_value = MAX_CURRENT;
 											}
 											else{
-													channels[uiState.channelFlag].current_value -= 1;
+													channels[uiState.channelFlag].current_value -= GetLongPressStep(key_press_time2, 1, 5);
 											}
 									} else {  // 电压模式
-											if (channels[uiState.channelFlag].voltage_value == MIN_VOLTAGE) {
+											if (channels[uiState.channelFlag].voltage_value < GetLongPressStep(key_press_time2, 1, 5)) {
 												channels[uiState.channelFlag].voltage_value = MAX_VOLTAGE;
 											}
 											else{
-													channels[uiState.channelFlag].voltage_value -= 1;
+													channels[uiState.channelFlag].voltage_value -= GetLongPressStep(key_press_time2, 1, 5);
 											}
 									}
 							} else if (uiState.settingFlag == 3) {  // PWM频率
-									if (channels[uiState.channelFlag].pwm_frequency > 1) {
-											channels[uiState.channelFlag].pwm_frequency -= 1;  // 减少PWM频率
+									if (channels[uiState.channelFlag].pwm_frequency > GetLongPressStep(key_press_time2, 1, 5)) {
+											channels[uiState.channelFlag].pwm_frequency -= GetLongPressStep(key_press_time2, 1, 5);  // 减少PWM频率
 									}
 									else
 											channels[uiState.channelFlag].pwm_frequency = MAX_PWM_FREQ;  // 减少PWM频率
 							} else if (uiState.settingFlag == 4) {  // PWM占空�??
-									if (channels[uiState.channelFlag].pwm_duty_cycle > MIN_DUTY) {
-											channels[uiState.channelFlag].pwm_duty_cycle -= 1;  // 减少PWM占空�??
+									if (channels[uiState.channelFlag].pwm_duty_cycle >= GetLongPressStep(key_press_time2, 1, 5)) {
+											channels[uiState.channelFlag].pwm_duty_cycle -= GetLongPressStep(key_press_time2, 1, 5);  // 减少PWM占空�??
 									}
 									else
 										channels[uiState.channelFlag].pwm_duty_cycle = MAX_DUTY;
 							} else if (uiState.settingFlag == 5) {
 										if(channels[uiState.channelFlag].mode){
-											if (channels[uiState.channelFlag].full_scale_V >= 10)
-													channels[uiState.channelFlag].full_scale_V -= 10;
+											if (channels[uiState.channelFlag].full_scale_V >= GetLongPressStep(key_press_time2, 10, 50))
+													channels[uiState.channelFlag].full_scale_V -= GetLongPressStep(key_press_time2, 10, 50);
 											else
 													channels[uiState.channelFlag].full_scale_V = 0;
 										}
 										else{
-											if (channels[uiState.channelFlag].full_scale_A >= 10)
-													channels[uiState.channelFlag].full_scale_A -= 10;
+											if (channels[uiState.channelFlag].full_scale_A >= GetLongPressStep(key_press_time2, 10, 50))
+													channels[uiState.channelFlag].full_scale_A -= GetLongPressStep(key_press_time2, 10, 50);
 											else
 													channels[uiState.channelFlag].full_scale_A = 0;
 										}
 									}
 									else if (uiState.settingFlag == 6) {  // 零点偏移
 										if(channels[uiState.channelFlag].mode){
-											if (channels[uiState.channelFlag].zero_offset_V >= MIN_ZERO_OFFSET + 10)
-												channels[uiState.channelFlag].zero_offset_V -= 10;
+											if (channels[uiState.channelFlag].zero_offset_V >= GetLongPressStep(key_press_time2, 10, 50))
+												channels[uiState.channelFlag].zero_offset_V -= GetLongPressStep(key_press_time2, 10, 50);
 											else
 												channels[uiState.channelFlag].zero_offset_V = MIN_ZERO_OFFSET;
 										}
 										else{
-											if (channels[uiState.channelFlag].zero_offset_A >= MIN_ZERO_OFFSET + 10)
-												channels[uiState.channelFlag].zero_offset_A -= 10;
+											if (channels[uiState.channelFlag].zero_offset_A >= GetLongPressStep(key_press_time2, 10, 50))
+												channels[uiState.channelFlag].zero_offset_A -= GetLongPressStep(key_press_time2, 10, 50);
 											else
 												channels[uiState.channelFlag].zero_offset_A = MIN_ZERO_OFFSET;
 										}
@@ -1237,6 +1374,8 @@ void KeyScan(void) {
 									// 校准完成，启用多点校准并保存
 									multiCalibEnabled[uiState.channelFlag] = 1;
 									SaveCalibrationToFlash();
+									setMode();
+									setCurrent();
 									// 退出校准页面
 									inCalibPage = 0;
 									calibPointIndex = 0;
@@ -1313,8 +1452,9 @@ void KeyScan(void) {
 }
 
 void SaveCalibrationToFlash(void) {
-    CalibrationData_t calData;
+    CalibrationData_t calData = {0};
     for (uint8_t i = 0; i < 4; i++) {
+        SanitizeMultiCalibChannel(i);
         calData.channels[i].full_scale_A = channels[i].full_scale_A;
         calData.channels[i].full_scale_V = channels[i].full_scale_V;
         calData.channels[i].zero_offset_A = channels[i].zero_offset_A;
@@ -1341,11 +1481,12 @@ void LoadCalibrationFromFlash(void) {
             channels[i].zero_offset_A = calData.channels[i].zero_offset_A;
             channels[i].zero_offset_V = calData.channels[i].zero_offset_V;
             // 加载多点校准数据
-            for (uint8_t j = 0; j < CALIB_POINTS_NUM; j++) {
-                multiCalibData[i][j] = calData.multi_calib[i].measured[j];
-            }
-            multiCalibEnabled[i] = calData.multi_calib[i].enabled;
+        for (uint8_t j = 0; j < CALIB_POINTS_NUM; j++) {
+            multiCalibData[i][j] = calData.multi_calib[i].measured[j];
         }
+        SanitizeMultiCalibChannel(i);
+        multiCalibEnabled[i] = calData.multi_calib[i].enabled;
+    }
         // 加载设备ID
         if (calData.device_id > 0 && calData.device_id <= MAX_DEVICE_ID) {
             deviceID = calData.device_id;
@@ -1359,7 +1500,8 @@ void LoadCalibrationFromFlash(void) {
 void Check_I2C_Devices(void)
 {
     for (uint8_t i = 0; i < 4; i++) {
-			if(HAL_I2C_IsDeviceReady(&hi2c1, (0x58 + i) << 1, 2, 10) == HAL_OK)
+        channels[i].status = 0;
+			if(HAL_I2C_IsDeviceReady(&hi2c1, (0x58 + i) << 1, 2, 10) == HAL_OK) {
         channels[i].status = 1;
 				buffer[0] = 0x01;           // 控制命令地址
 				buffer[1] = 0x24;           // 命令高位
@@ -1368,6 +1510,7 @@ void Check_I2C_Devices(void)
 				buffer[1] = 0x00;          
 				buffer[2] = 0x00;         
 				HAL_I2C_Master_Transmit(&hi2c1, (0x58 + i) << 1, buffer, 3, HAL_MAX_DELAY);
+        }
     }
 }
 
